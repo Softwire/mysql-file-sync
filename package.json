@@ -1,6 +1,6 @@
 {
   "name": "mysql-file-sync",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Continuously keeps a set of MySQL tables in-sync with a set of .sql files on disk - changes are detected and propogated both ways",
   "files": [
     "bin"
