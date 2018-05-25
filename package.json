@@ -1,0 +1,29 @@
+{
+  "name": "mysql-file-sync",
+  "version": "1.0.0",
+  "description": "Continuously keeps a set of MySQL tables in-sync with a set of .sql files on disk - changes are detected and propogated both ways",
+  "files": [
+    "bin"
+  ],
+  "preferGlobal": true,
+  "bin": {
+    "mysql-file-sync": "./bin/mysql-file-sync"
+  },
+  "dependencies": {
+    "js-yaml": "^3.11.0",
+    "mysql": "^2.15.0"
+  },
+  "author": {
+    "name": "James Griffiths",
+    "email": "james.griffiths@softwire.com"
+  },
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Softwire/mysql-file-sync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Softwire/mysql-file-sync/issues"
+  },
+  "homepage": "https://github.com/Softwire/mysql-file-sync#readme"
+}

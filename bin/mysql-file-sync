@@ -1,0 +1,295 @@
+#!/usr/bin/env node
+
+'use strict';
+
+const fs = require('fs');
+const child_process = require('child_process');
+const yaml = require('js-yaml');
+const mysql = require('mysql');
+
+
+var config = null;
+var connection = null;
+
+
+//////////
+// START
+
+start();
+
+async function start() {
+    sayHello();
+    readAndValidateConfigFile();
+    connectToDatabase(config);
+    checkGitStatusOfFiles();
+
+    initialCopyOfTablesToFiles();
+    startMainLoop();
+}
+
+function startMainLoop() {
+    console.log(''); // make some space in the log
+    console.log('watching database table(s) and file(s) for changes');
+
+    mainLoop();
+}
+
+function mainLoop() {
+    syncTables();
+
+    setTimeout(mainLoop, 5*1000);
+}
+
+
+//////////////
+// GREETINGS
+
+function sayHello() {
+    console.log('-----------------------------');
+    console.log('-----  mysql-file-sync  -----');
+    console.log('-----------------------------');
+}
+
+
+///////////
+// CONFIG
+
+function readAndValidateConfigFile() {
+    console.log(''); // make some space in the log
+    console.log('reading / validating config file');
+
+    const configFilename = './.mysql-file-sync.yml';
+    console.log('- reading config file [' + configFilename + ']');
+  
+    var confileFileText = fs.readFileSync(configFilename);
+    config = yaml.safeLoad(confileFileText);
+  
+    console.log('- validating config file');
+    validateConfigFile(config);
+}
+
+function validateConfigFile(config) {
+    if (!config.hasOwnProperty('database')
+    || !config['database'].hasOwnProperty('host')
+    || !config['database'].hasOwnProperty('username')
+    || !config['database'].hasOwnProperty('password')
+    || !config['database'].hasOwnProperty('schema')
+    ) {
+        console.log('ERROR: config file must contain these properties...');
+        console.log('database:');
+        console.log('  host:');
+        console.log('  username:');
+        console.log('  password:');
+        console.log('  schema:');
+        process.exit();
+    }
+}
+
+function connectToDatabase(config) {
+    console.log(''); // make some space in the log
+    console.log('connecting to MySql');
+
+    connection = mysql.createConnection({
+        host     : config['database']['host'],
+        user     : config['database']['username'],
+        password : config['database']['password'],
+        database : config['database']['schema'],
+        multipleStatements: true
+    });
+
+    connection.connect();
+    console.log('- connected');
+}
+
+
+///////////////
+// GIT STATUS
+
+function checkGitStatusOfFiles() {
+    console.log(''); // blank line
+    console.log('checking the Git status of the files - all files must be clean to proceed');
+
+    console.log('- checking if git exists');
+    const gitOutput = child_process.execSync('git --help');
+    if (!gitOutput.includes('usage:')) {
+        console.log('  - ERROR: git must be in the PATH');
+        process.exit();
+    }
+
+    console.log('- checking if files are clean');
+    config.tables.forEach(table => {
+        checkGitStatusOfFile(table.file_name);
+    });
+}
+
+function checkGitStatusOfFile(filename) {
+    const gitOutput = child_process.execSync('git status "' + filename + '"');
+    
+    if (!gitOutput.includes('nothing to commit, working tree clean')) {
+        console.log('  - ERROR: file [' + filename + '] is unclean in Git. Please commit any changes.');
+        process.exit();
+    }
+    else {
+        console.log('  - file [' + filename + '] is clean in Git - continue');
+    }
+}
+
+
+/////////////////
+// INITIAL COPY
+
+function initialCopyOfTablesToFiles() {
+
+    for (let i = 0; i < config.tables.length; i++) {
+        const tableConfig = config.tables[i];
+        
+        // copyTableToFile(tableConfig);
+
+        refreshChecksumAndUpdatedTimeInConfig(tableConfig);
+    }
+}
+
+
+////////////////
+// SYNC TABLES
+
+function syncTables() {
+    config.tables.forEach(table => {
+        syncTable(table);
+    });
+}
+
+async function syncTable(tableConfig) {
+    const tableChecksum = await getTableChecksum(tableConfig);
+    const timeFileLastUpdated = await getTimeFileLastUpdated(tableConfig);
+
+    if (tableChecksum != tableConfig.tableChecksum) {
+        console.log('table [' + tableConfig.table_name + '] changed - copying to file');
+        await copyTableToFile(tableConfig);
+        refreshChecksumAndUpdatedTimeInConfig(tableConfig);
+    }
+    else if (timeFileLastUpdated != tableConfig.timeFileLastUpdated) {
+        console.log('file [' + tableConfig.file_name + '] changed - updating database');
+        await copyFileToTable(tableConfig);
+        refreshChecksumAndUpdatedTimeInConfig(tableConfig);
+    }
+
+}
+
+
+//////////////////////
+// GET UPDATED TIMES
+
+function getTableChecksum(tableConfig) {
+    return new Promise(resolve => {
+        const getLastUpdatedQuery =
+        "CHECKSUM TABLE " + config.database.schema + "." + tableConfig.table_name;
+
+        connection.query(getLastUpdatedQuery, function (error, results, fields) {
+            if (error) throw error;
+            resolve(results[0]['Checksum']);
+        });
+    });
+}
+
+function getTimeFileLastUpdated(tableConfig) {
+    return fs.statSync(tableConfig.file_name).mtime.toISOString();
+}
+
+async function refreshChecksumAndUpdatedTimeInConfig(tableConfig) {
+    const tableChecksum = await getTableChecksum(tableConfig);
+    const timeFileLastUpdated = await getTimeFileLastUpdated(tableConfig);
+
+    // console.log('table [' + tableConfig.table_name + '] has tableChecksum [' + tableChecksum + '] and timeFileLastUpdated [' + timeFileLastUpdated + '] ')
+
+    tableConfig.tableChecksum = tableChecksum;
+    tableConfig.timeFileLastUpdated = timeFileLastUpdated;
+}
+
+
+///////////
+// EXPORT
+
+function copyTableToFile(tableConfig) {
+    return new Promise(resolve => {
+        const getLastUpdatedQuery =
+        "SELECT * FROM " + config.database.schema + "." + tableConfig.table_name + " ORDER BY " + tableConfig.order_by;
+
+        connection.query(getLastUpdatedQuery, function (error, results, fields) {
+            if (error) throw error;
+
+            const tableExportedAsSql = generateSql(tableConfig, results);
+            saveSqlToFile(tableConfig, tableExportedAsSql);
+
+            resolve();
+        });
+    });
+}
+
+function generateSql(tableConfig, results) {
+    var truncateSql = 'TRUNCATE TABLE ' + config.database.schema + '.' + tableConfig.table_name + ';\r\n';
+    truncateSql += '\r\n';
+
+    var columns = [];
+    Object.getOwnPropertyNames(results[0]).forEach(propertyName => {
+        if (!tableConfig.hasOwnProperty('ignore_columns') || !tableConfig.ignore_columns.includes(propertyName)) {
+            columns.push(propertyName);
+        }
+    });
+    var columnsSql = '(' + columns.join(', ') + ')';
+
+    var rowsSql = '';
+    results.forEach(row => {
+       if (!excludeRow(tableConfig, row)) {
+            rowsSql += 'INSERT INTO ' + config.database.schema + '.' + tableConfig.table_name + ' ';
+            rowsSql += columnsSql + ' ';
+            rowsSql += 'VALUES (';
+
+            var cells = [];
+            columns.forEach(column => {
+                var cellValue = row[column]
+                .replace(/\\/g, '\\\\') // Replace \ with \\
+                .replace(/'/g, '\\\''); // Replace ' with \'
+                cells.push('\'' + cellValue + '\'');
+            });
+            rowsSql += cells.join(', ');
+            rowsSql += ');\r\n';
+       }
+    });
+    
+    return truncateSql + rowsSql;
+}
+
+function excludeRow(tableConfig, row) {
+    if (tableConfig.hasOwnProperty('exclude_rows')) {
+        for (let i = 0; i < tableConfig.exclude_rows.length; i++) {
+            const excludeRow = tableConfig.exclude_rows[i];
+            if (row[excludeRow.column].match(new RegExp(excludeRow.value_to_exclude, '')) !== null) {
+                return true;
+            }
+        }
+       return false;
+    }
+    return false;
+}
+
+function saveSqlToFile(tableConfig, tableExportedAsSql) {
+    fs.writeFileSync(tableConfig.file_name, tableExportedAsSql);
+}
+
+
+///////////
+// IMPORT
+
+function copyFileToTable(tableConfig) {
+    return new Promise(resolve => {
+        const importSql = fs.readFileSync(tableConfig.file_name);
+
+        const wholeQuery = ' ' + importSql;
+
+        connection.query(wholeQuery, function (error, results, fields) {
+            if (error) throw error;
+            resolve();
+        });
+    });
+}
